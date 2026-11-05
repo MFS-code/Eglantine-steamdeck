@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <limits>
@@ -570,6 +571,7 @@ private:
     bool has_deleted_images = false;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
+    u64 driver_used_memory = 0; ///< Last raw driver-reported usage, before the sentenced-image discount
     u64 minimum_memory;
     u64 expected_memory;
     u64 critical_memory;
@@ -612,6 +614,10 @@ private:
     static constexpr size_t TICKS_TO_DESTROY = 8;
 #endif
     DelayedDestructionRing<Image, TICKS_TO_DESTROY> sentenced_images;
+    /// Device memory of the images in each slot of sentenced_images (same index): deleted, but
+    /// counted in the driver's usage until the ring destroys them.
+    std::array<u64, TICKS_TO_DESTROY> sentenced_image_bytes{};
+    size_t sentenced_image_index = 0;
     DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
     DelayedDestructionRing<Framebuffer, TICKS_TO_DESTROY> sentenced_framebuffers;
 

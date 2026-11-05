@@ -28,6 +28,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/texture_cache/collector_accounting.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
@@ -170,7 +171,7 @@ void TextureCache<P>::RunGarbageCollector() {
         if (image.guest_size_bytes >= 64_MiB) {
             static u32 logged{};
             if (logged++ < 40) {
-                LOG_INFO(HW_GPU, "Texture collector evicts {} MiB image {:#x} ({}x{}x{} layers {} levels {} format {}, costly {}, {} frames unused; used {} MiB, expected {} MiB, critical {} MiB)",
+                LOG_INFO(HW_GPU, "Texture collector evicts {} MiB image {:#x} ({}x{}x{} layers {} levels {} format {}, costly {}, {} frames unused; collector counts {} MiB, expected {} MiB, critical {} MiB)",
                          image.guest_size_bytes >> 20, image.gpu_addr, image.info.size.width,
                          image.info.size.height, image.info.size.depth, image.info.resources.layers,
                          image.info.resources.levels, static_cast<u32>(image.info.format),
@@ -319,7 +320,22 @@ void TextureCache<P>::TickFrame() {
     }
     // If we can obtain the memory info, use it instead of the estimate.
     if (runtime.CanReportMemoryUsage()) {
-        total_used_memory = runtime.GetDeviceMemoryUsage();
+        driver_used_memory = runtime.GetDeviceMemoryUsage();
+        // Images the collector deleted keep their memory for TICKS_TO_DESTROY frames: counting
+        // it kept the collector in aggressive mode, deleting 40+ images a frame for frames after
+        // it had freed enough (title 1: frames over 100 ms for seconds at a time).
+        // The discount reuses the same estimates the non-driver path books (RegisterImage/
+        // DeleteImage) and saturates at the driver total: saturation avoids underflow, it does
+        // not prove estimates equal committed bytes. Collector decisions use the discounted
+        // figure; the raw driver figure stays in driver_used_memory for honest telemetry.
+        // The aggregate only feeds the clamp against the driver figure, so clamp the running
+        // sum at that figure: multiple individually valid slots can never wrap u64, and the
+        // result is identical to min(driver, exact sum).
+        u64 sentenced_pending_bytes = 0;
+        for (const u64 bytes : sentenced_image_bytes) {
+            sentenced_pending_bytes += (std::min)(bytes, driver_used_memory - sentenced_pending_bytes);
+        }
+        total_used_memory = driver_used_memory - sentenced_pending_bytes;
     }
     // Every 600 frames (every 200 under EDEN_NX2_GPU_PROFILE): device memory in use against the
     // collector's thresholds, and what the images themselves account for (VRAM pressure makes the
@@ -329,8 +345,16 @@ void TextureCache<P>::TickFrame() {
     // EDEN_NX2_MEM_TRACE=1: the same every 60 frames, to see what fills the device during a load.
     static const bool mem_trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
     if (static u64 trace_frames{}; mem_trace && ++trace_frames % 60 == 0) {
-        LOG_INFO(HW_GPU, "mem trace: device memory {} MiB, {} images, {} unbacked",
-                 total_used_memory >> 20, slot_images.size(), unbacked_image_ids.size());
+        if (runtime.CanReportMemoryUsage()) {
+            LOG_INFO(HW_GPU,
+                     "mem trace: device memory {} MiB (collector counts {} MiB, {} MiB pending destruction), {} images, {} unbacked",
+                     driver_used_memory >> 20, total_used_memory >> 20,
+                     (driver_used_memory - (std::min)(driver_used_memory, total_used_memory)) >> 20, slot_images.size(),
+                     unbacked_image_ids.size());
+        } else {
+            LOG_INFO(HW_GPU, "mem trace: estimated memory {} MiB, {} images, {} unbacked",
+                     total_used_memory >> 20, slot_images.size(), unbacked_image_ids.size());
+        }
         if constexpr (requires { runtime.LogMemoryStatistics(); }) {
             runtime.LogMemoryStatistics();
         }
@@ -340,9 +364,17 @@ void TextureCache<P>::TickFrame() {
         // Under the profile, every 256 MiB step up or down as well: the Deck's GTT pool fills
         // in seconds when a title loads, between two regular reports.
         static u64 last_logged{};
-        if (total_used_memory + (256_MiB) < last_logged || total_used_memory > last_logged + (256_MiB)) {
-            last_logged = total_used_memory;
-            LOG_INFO(HW_GPU, "Texture cache: device memory now {} MiB", total_used_memory >> 20);
+        const bool reported = runtime.CanReportMemoryUsage();
+        const u64 device_now = reported ? driver_used_memory : total_used_memory;
+        if (device_now + (256_MiB) < last_logged || device_now > last_logged + (256_MiB)) {
+            last_logged = device_now;
+            if (reported) {
+                LOG_INFO(HW_GPU, "Texture cache: device memory now {} MiB (collector counts {} MiB)",
+                         driver_used_memory >> 20, total_used_memory >> 20);
+            } else {
+                LOG_INFO(HW_GPU, "Texture cache: estimated memory now {} MiB",
+                         total_used_memory >> 20);
+            }
             if constexpr (requires { runtime.LogMemoryStatistics(); }) {
                 runtime.LogMemoryStatistics();
             }
@@ -380,9 +412,15 @@ void TextureCache<P>::TickFrame() {
             format.host_bytes += host;
             ++format.count;
         }
-        LOG_INFO(HW_GPU, "Texture cache: device memory {} MiB (expected {} MiB, critical {} MiB), {} images {} MiB guest / {} MiB host",
-                 total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20, images,
-                 image_bytes >> 20, host_bytes >> 20);
+        if (runtime.CanReportMemoryUsage()) {
+            LOG_INFO(HW_GPU, "Texture cache: device memory {} MiB, collector counts {} MiB (expected {} MiB, critical {} MiB), {} images {} MiB guest / {} MiB host",
+                     driver_used_memory >> 20, total_used_memory >> 20, expected_memory >> 20,
+                     critical_memory >> 20, images, image_bytes >> 20, host_bytes >> 20);
+        } else {
+            LOG_INFO(HW_GPU, "Texture cache: estimated memory {} MiB (expected {} MiB, critical {} MiB), {} images {} MiB guest / {} MiB host",
+                     total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20, images,
+                     image_bytes >> 20, host_bytes >> 20);
+        }
         std::partial_sort(largest.begin(), largest.begin() + std::min<size_t>(12, largest.size()),
                           largest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
         for (size_t i = 0; i < std::min<size_t>(12, largest.size()); ++i) {
@@ -438,6 +476,8 @@ void TextureCache<P>::TickFrame() {
     EvictDormantImages();
     RetryUnbackedImages();
     sentenced_images.Tick();
+    sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
+    sentenced_image_bytes[sentenced_image_index] = 0;
     sentenced_framebuffers.Tick();
     sentenced_image_view.Tick();
     TickAsyncDecode();
@@ -2606,7 +2646,11 @@ void TextureCache<P>::MakeDormant(ImageId image_id) {
     image.flags &= ~(ImageFlagBits::Alias | ImageFlagBits::BadOverlap);
 
     const u64 bytes = Common::AlignUp(HostImageSizeBytes(image), 1024);
-    total_used_memory -= bytes;
+    // Same policy as DeleteImage (see there): the estimate can exceed the refreshed total.
+    if (CollectorSubtract(total_used_memory, bytes)) [[unlikely]] {
+        LOG_WARNING(HW_GPU, "dormant image's estimate {} MiB exceeds collector total; saturating",
+                    bytes >> 20);
+    }
     dormant_bytes += bytes;
     dormant_images[image.gpu_addr].push_back(DormantImage{image_id, frame_tick});
 }
@@ -3355,10 +3399,39 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
             async_decode->cancelled = true;
         }
     }
-    if (image.HasScaled()) {
-        total_used_memory -= GetScaledImageSizeBytes(image);
+    // total_used_memory is refreshed from the (discounted) driver figure every TickFrame and
+    // adjusted by booked estimates in between (the two are different units: an estimate is not
+    // a driver byte count), so an image's estimate can exceed the current total. Saturate
+    // instead of wrapping: a wrapped total reads as over-critical to every collector threshold
+    // until the next refresh. Saturation is containment, not correction: the absorbed excess
+    // biases the counter toward under-collection for the rest of the frame, the next refresh
+    // re-derives the anchor (it does not recover the absorbed divergence), and every saturating
+    // step is logged so the mismatch stays observable. Additions stay unchecked.
+    const u64 deleted_scaled_bytes = image.HasScaled() ? GetScaledImageSizeBytes(image) : 0;
+    const u64 deleted_host_bytes = Common::AlignUp(HostImageSizeBytes(image), 1024);
+    if (CollectorSubtract(total_used_memory, deleted_scaled_bytes)) [[unlikely]] {
+        LOG_WARNING(HW_GPU, "deleted image's scaled estimate {} MiB exceeds collector total; saturating",
+                    deleted_scaled_bytes >> 20);
     }
-    total_used_memory -= Common::AlignUp(HostImageSizeBytes(image), 1024);
+    if (CollectorSubtract(total_used_memory, deleted_host_bytes)) [[unlikely]] {
+        LOG_WARNING(HW_GPU, "deleted image's host estimate {} MiB exceeds collector total; saturating",
+                    deleted_host_bytes >> 20);
+    }
+    // Mirror of the two subtractions above, for the driver-reported path in TickFrame: the
+    // driver keeps counting this memory until the ring destroys the image. Unbacked images were
+    // never backed by device memory, and sparse images commit only populated pages, so their
+    // estimate does not track driver bytes: keep both out of the discount. Under-discounting is
+    // the safe direction - it only leaves the collector stricter, never looser.
+    // Checked scaled+host sum: on (physically implausible) overflow drop the discount
+    // entirely, same direction as the slot-accumulation guard below.
+    u64 freed_bytes = 0;
+    if (False(image.flags & ImageFlagBits::Unbacked) && False(image.flags & ImageFlagBits::Sparse)) {
+        if (deleted_scaled_bytes > (std::numeric_limits<u64>::max)() - deleted_host_bytes) [[unlikely]] {
+            LOG_ERROR(HW_GPU, "sentenced-image size overflowed; discount dropped");
+        } else {
+            freed_bytes = deleted_scaled_bytes + deleted_host_bytes;
+        }
+    }
     const GPUVAddr gpu_addr = image.gpu_addr;
     const auto alloc_it = image_allocs_table.find(gpu_addr);
     if (alloc_it == image_allocs_table.end()) {
@@ -3424,12 +3497,23 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         LOG_INFO(Render_Vulkan, "Retained image for queued download: id={}", image_id.Value());
     } else if (!immediate_delete) {
         sentenced_images.Push(std::move(slot_images[image_id]));
+        // The slot accumulates booked estimates, which can legitimately exceed physical
+        // VRAM, so no physical bound applies. On (physically implausible) u64 overflow,
+        // keep the previous total: this delete's discount is dropped and the collector
+        // behaves as if it had not been discounted - the unported behavior.
+        u64& slot_bytes = sentenced_image_bytes[sentenced_image_index];
+        if (freed_bytes > (std::numeric_limits<u64>::max)() - slot_bytes) [[unlikely]] {
+            LOG_ERROR(HW_GPU, "sentenced-image byte accounting overflowed; discount dropped");
+        } else {
+            slot_bytes += freed_bytes;
+        }
     }
     slot_images.erase(image_id);
 
     alloc_images.erase(alloc_image_it);
     if (alloc_images.empty()) {
         image_allocs_table.erase(alloc_it);
+        slot_image_allocs.erase(alloc_id);
     }
     for (size_t c : active_channel_ids) {
         auto& channel_info = channel_storage[c];
@@ -3471,6 +3555,7 @@ void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_vi
                 last_framebuffer_serial = 0;
             }
             sentenced_framebuffers.Push(std::move(slot_framebuffers[framebuffer_id]));
+            slot_framebuffers.erase(framebuffer_id);
             it = framebuffers.erase(it);
         } else {
             ++it;
