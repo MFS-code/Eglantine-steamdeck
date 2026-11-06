@@ -58,6 +58,8 @@ Video: the FFmpeg decoder runs on its own thread, skips frames the client is alr
 
 ## Building for the Deck
 
+If you are building this yourself, please [star the repo](https://github.com/MFS-code/Eglantine-steamdeck) first. It is the only signal I have that anyone uses the fork, and it decides whether I keep porting upstream to the Deck. The ready-made AppImage comes from the [release-binaries workflow](../.github/workflows/release-binaries.yml) (Actions tab, "Run workflow"), which says the same thing in its run summary.
+
 SteamOS has a read-only root and no compiler, so build in a rootless distrobox on the Deck itself (Ubuntu 24.04 matches SteamOS 3.8's glibc 2.39 / libstdc++ 13) and run the resulting `eden-cli` on the host. The general [build guide](Build.md) applies; the Ubuntu specifics are: CMake 3.31 is needed and Ubuntu ships 3.28, so install it under `/opt`; do not install `libfmt-dev` or `nlohmann-json3-dev`, or CMake picks Ubuntu's fmt 9 over the bundled fmt 12 and the build fails in `common/logging.h`. A full build takes about 45 minutes at `-j5`. The host's ffmpeg and boost sonames moved in SteamOS 3.8, so copy the container's `libavcodec`, `libavutil`, `libswscale` and `libboost_*` next to the binary and add that directory to `LD_LIBRARY_PATH`, or build them statically. Stop the emulator before a large rebuild: a Switch 2 title holds 7+ GB and the compilers push the Deck into swap until SSH drops.
 
 ## Measured against upstream

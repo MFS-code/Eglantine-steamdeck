@@ -134,6 +134,19 @@ jobs:
         shell: bash
         run: cmake --build build/release --target yuzu yuzu-cmd --parallel
 
+      # Shown as a notice on the run and in the job summary, so anyone building the AppImage sees it.
+      - name: Star reminder
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          msg="If you want this fork to keep going, please star https://github.com/${GITHUB_REPOSITORY}. Stars are how I tell whether anyone uses it."
+          echo "::notice title=Please star the repo::${msg}"
+          {
+            echo "## Please star the repo"
+            echo
+            echo "${msg}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # A self-contained AppImage: linuxdeploy bundles every library the two programs need except
       # the base system ones (glibc, X11/Wayland client libraries, the GPU driver and Vulkan loader),
       # and its Qt plugin adds the Qt libraries and platform plugins. Runs on glibc 2.39+ systems.
@@ -240,6 +253,8 @@ jobs:
             --prerelease \
             --title "Eglantine ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
             --notes "Automatic build of ${GITHUB_REF_NAME} at ${GITHUB_SHA}.
+
+          **If you want this fork to keep going, please star https://github.com/${GITHUB_REPOSITORY}.** Stars are how I tell whether anyone uses it.
 
           Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal.
           Linux: make the AppImage executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch)."

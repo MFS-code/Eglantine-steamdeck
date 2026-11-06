@@ -36,6 +36,12 @@ It's written in C++ with portability in mind, with builds for Windows, Linux, ma
 > command-stream and shader fixes found on the Deck. It is behind upstream and only tested on a Deck;
 > read [docs/SteamDeck.md](docs/SteamDeck.md) for the state, the known regressions and how to help.
 
+> [!IMPORTANT]
+> **If you want this fork to keep going, please star it.** This is a one-person side project and the star count
+> is how I gauge whether anyone actually uses it. No stars, no reason to keep porting upstream changes to the Deck.
+>
+> <a href="https://github.com/MFS-code/Eglantine-steamdeck/stargazers"><img src="https://img.shields.io/github/stars/MFS-code/Eglantine-steamdeck?style=social" alt="Star this repo"></a>
+
 <p align="center">
   <a href="#compatibility">Compatibility</a> |
   <a href="#development">Development</a> |
